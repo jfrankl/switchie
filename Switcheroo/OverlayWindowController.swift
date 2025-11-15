@@ -11,7 +11,7 @@ final class OverlayWindowController {
 
     init() {}
 
-    func show(candidates: [NSRunningApplication], selectedIndex: Int?, searchText: String, onSelect: @escaping (NSRunningApplication) -> Void) {
+    func show(candidates: [NSRunningApplication], selectedIndex: Int?, searchText: String, showNumberBadges: Bool, onSelect: @escaping (NSRunningApplication) -> Void) {
         if window == nil {
             print("[Overlay] createWindow() (lazy)")
             createWindow()
@@ -24,7 +24,7 @@ final class OverlayWindowController {
         window?.isReleasedWhenClosed = false
 
         print("[Overlay] show() appActive=\(NSApp.isActive) candidates=\(candidates.count) selectedIndex=\(String(describing: selectedIndex))")
-        update(candidates: candidates, selectedIndex: selectedIndex, searchText: searchText)
+        update(candidates: candidates, selectedIndex: selectedIndex, searchText: searchText, showNumberBadges: showNumberBadges)
 
         // Re-center just before showing in case screens/spaces changed
         centerOnActiveScreen()
@@ -50,12 +50,12 @@ final class OverlayWindowController {
         print("[Overlay] show() ordered front. isVisible=\(window?.isVisible ?? false) alpha=\(window?.alphaValue ?? -1) level=\(window?.level.rawValue ?? -1)")
     }
 
-    func update(candidates: [NSRunningApplication], selectedIndex: Int?, searchText: String) {
+    func update(candidates: [NSRunningApplication], selectedIndex: Int?, searchText: String, showNumberBadges: Bool) {
         guard let hosting else {
             print("[Overlay] update() skipped: hosting nil")
             return
         }
-        let view = SwitchOverlayView(candidates: candidates, selectedIndex: selectedIndex, searchText: searchText, onSelect: { [weak self] app in
+        let view = SwitchOverlayView(candidates: candidates, selectedIndex: selectedIndex, searchText: searchText, showNumberBadges: showNumberBadges, onSelect: { [weak self] app in
             self?.onSelect?(app)
         })
         hosting.rootView = view
@@ -88,23 +88,24 @@ final class OverlayWindowController {
     }
 
     private func createWindow() {
-        let content = SwitchOverlayView(candidates: [], selectedIndex: nil, searchText: "", onSelect: { _ in })
+        let content = SwitchOverlayView(candidates: [], selectedIndex: nil, searchText: "", showNumberBadges: true, onSelect: { _ in })
         let hosting = NSHostingView(rootView: content)
         hosting.translatesAutoresizingMaskIntoConstraints = false
 
+        // Non-activating, transparent panel with strongest always-on-top level
         let win = NonActivatingPanel(
             contentRect: NSRect(x: 0, y: 0, width: 600, height: 200),
-            styleMask: [.borderless],
+            styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false
         )
 
-        // Maximum possible to ensure on-top visibility
+        // Strongest practical "always on top" level
         win.level = .screenSaver
 
         win.isOpaque = false
         win.backgroundColor = .clear
-        win.hasShadow = true
+        win.hasShadow = false
         win.ignoresMouseEvents = false // allow clicking icons
 
         // Behaviors to appear across spaces/full-screen and remain stationary
@@ -114,6 +115,10 @@ final class OverlayWindowController {
             .ignoresCycle,
             .stationary
         ]
+
+        win.titleVisibility = .hidden
+        win.titlebarAppearsTransparent = true
+        win.isMovableByWindowBackground = true
 
         win.contentView = NSView()
         win.contentView?.wantsLayer = true
@@ -183,13 +188,25 @@ private final class NonActivatingPanel: NSPanel {
     override var canBecomeMain: Bool { false }
 
     override init(contentRect: NSRect, styleMask style: NSWindow.StyleMask, backing bufferingType: NSWindow.BackingStoreType, defer flag: Bool) {
-        super.init(contentRect: contentRect, styleMask: style, backing: bufferingType, defer: flag)
+        // Ensure .nonactivatingPanel remains set
+        var mask = style
+        mask.insert(.nonactivatingPanel)
+        super.init(contentRect: contentRect, styleMask: mask, backing: bufferingType, defer: flag)
         isMovableByWindowBackground = false
         worksWhenModal = false
+    }
+
+    // Swallow keying attempts to avoid AppKit warning logs.
+    override func makeKeyAndOrderFront(_ sender: Any?) {
+        // Do not call super; keep non-activating behavior and avoid warning.
+        orderFrontRegardless()
+    }
+
+    override func makeKey() {
+        // Intentionally do nothing to suppress the "makeKeyWindow" warning.
     }
 
     override func orderFront(_ sender: Any?) {
         super.orderFront(sender)
     }
 }
-

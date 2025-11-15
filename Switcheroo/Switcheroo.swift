@@ -14,13 +14,19 @@ struct SwitcherooApp: App {
                 Text("Switcheroo")
                     .font(.system(size: 22, weight: .bold))
 
-                Text("Press your shortcut to switch apps by MRU order.\nPress again to move to the next app.\nStop pressing for 2 seconds to select.")
+                Text("Press your shortcut to switch apps by MRU order.\nPress again to move to the next app.\nStop pressing for the configured delay to select.")
                     .multilineTextAlignment(.center)
                     .font(.system(size: 13))
                     .foregroundStyle(.secondary)
 
                 // Shortcut configuration
                 ShortcutSettingsView()
+
+                // Long-press delay control
+                LongPressDelaySettingsView()
+
+                // Number badges toggle
+                NumberBadgesSettingsView()
 
                 Spacer()
 
@@ -37,11 +43,14 @@ struct SwitcherooApp: App {
                     // Apply persisted dock icon preference
                     DockIconManager.shared.applyCurrentPreference()
                     statusBarController.installStatusItem()
+
+                    // Bring the app to the front even if another app is active
+                    NSApp.activate(ignoringOtherApps: true)
                 }
                 Switcher.shared.start()
             }
         }
-        .defaultSize(width: 520, height: 300)
+        .defaultSize(width: 520, height: 380)
         .windowStyle(.hiddenTitleBar)
         .windowToolbarStyle(.unifiedCompact)
         .windowResizability(.contentSize)
@@ -75,7 +84,8 @@ final class DockIconManager {
         NSApplication.shared.setActivationPolicy(policy)
 
         if visible {
-            NSApplication.shared.activate(ignoringOtherApps: false)
+            // Ensure the app comes to the very front when showing the Dock icon
+            NSApplication.shared.activate(ignoringOtherApps: true)
         }
     }
 }
@@ -159,15 +169,93 @@ struct ShortcutSettingsView: View {
     }
 }
 
+// MARK: - Long-press Delay Settings UI
+
+struct LongPressDelaySettingsView: View {
+    @ObservedObject private var switcher = Switcher.shared
+    @State private var tempDelay: Double = Switcher.shared.longPressThreshold
+
+    private let range: ClosedRange<Double> = 0.2...2.0
+    private let step: Double = 0.05
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Long‑Press Delay")
+                .font(.headline)
+            HStack(spacing: 12) {
+                Slider(value: $tempDelay, in: range, step: step, onEditingChanged: { editing in
+                    if !editing {
+                        apply()
+                    }
+                })
+                .frame(width: 200)
+
+                Stepper(value: $tempDelay, in: range, step: step) {
+                    EmptyView()
+                }
+                .onChange(of: tempDelay) { _, _ in
+                    // live apply on stepper taps
+                    apply()
+                }
+
+                Text(String(format: "%.2fs", tempDelay))
+                    .monospacedDigit()
+                    .frame(width: 56, alignment: .trailing)
+                    .foregroundStyle(.secondary)
+
+                Button("Reset") {
+                    tempDelay = Switcher.defaultLongPressDelay
+                    apply()
+                }
+            }
+            .onAppear {
+                tempDelay = switcher.longPressThreshold
+            }
+        }
+    }
+
+    private func apply() {
+        Switcher.shared.applyLongPressDelay(tempDelay)
+    }
+}
+
+// MARK: - Number badges settings UI
+
+struct NumberBadgesSettingsView: View {
+    @ObservedObject private var switcher = Switcher.shared
+
+    var body: some View {
+        Toggle("Show number badges in overlay", isOn: Binding(
+            get: { switcher.showNumberBadges },
+            set: { Switcher.shared.setShowNumberBadges($0) }
+        ))
+        .toggleStyle(.switch)
+        .padding(.top, 6)
+    }
+}
+
 // MARK: - Switcher Core
 
 final class Switcher: ObservableObject {
     static let shared = Switcher()
-    private init() {}
+    private init() {
+        // Load persisted long-press delay at init
+        self.longPressThreshold = Self.loadPersistedLongPressDelay()
+        // Load persisted number badges preference
+        self.showNumberBadges = UserDefaults.standard.object(forKey: Self.numberBadgesDefaultsKey) as? Bool ?? true
+    }
 
     @Published var backgroundColor: Color = Color(NSColor.windowBackgroundColor)
 
-    private let longPressThreshold: TimeInterval = 1.0
+    // Long-press delay (user adjustable)
+    @Published private(set) var longPressThreshold: TimeInterval
+    static let defaultLongPressDelay: TimeInterval = 1.0
+    private static let longPressDefaultsKey = "LongPressDelay"
+
+    // Number badges preference
+    @Published private(set) var showNumberBadges: Bool
+    private static let numberBadgesDefaultsKey = "ShowNumberBadges"
+
     private var pressStart: Date?
     private var longPressTimer: DispatchSourceTimer?
     private var actionConsumedForThisPress = false
@@ -181,9 +269,12 @@ final class Switcher: ObservableObject {
 
     private var shortcut: Shortcut = .default
 
-    // Type-to-select buffer and monitor
-    private var searchBuffer: String = ""
-    private var keyMonitor: Any?
+    // Overlay typing state
+    private var overlaySearchText: String = ""
+    private var overlayFiltered: [NSRunningApplication] = []
+    private var overlaySelectedIndex: Int? = nil
+    private var overlayEventMonitor: Any?
+    private var overlayGlobalEventMonitor: Any? // NEW: global key monitor
 
     func start() {
         requestNotificationAuthorization()
@@ -216,11 +307,43 @@ final class Switcher: ObservableObject {
         }
     }
 
+    func applyLongPressDelay(_ value: TimeInterval) {
+        let clamped = max(0.05, min(5.0, value))
+        guard clamped != longPressThreshold else { return }
+        longPressThreshold = clamped
+        UserDefaults.standard.set(clamped, forKey: Self.longPressDefaultsKey)
+
+        // If a long-press is currently pending, reschedule to respect the new delay
+        if pressStart != nil {
+            rescheduleLongPressTimer()
+        }
+    }
+
+    func setShowNumberBadges(_ show: Bool) {
+        guard show != showNumberBadges else { return }
+        showNumberBadges = show
+        UserDefaults.standard.set(show, forKey: Self.numberBadgesDefaultsKey)
+        // If overlay is visible, refresh it to reflect the new setting
+        overlay.update(candidates: overlayFiltered, selectedIndex: overlaySelectedIndex, searchText: overlaySearchText, showNumberBadges: showNumberBadges)
+    }
+
+    private static func loadPersistedLongPressDelay() -> TimeInterval {
+        let v = UserDefaults.standard.double(forKey: longPressDefaultsKey)
+        if v == 0 {
+            return defaultLongPressDelay
+        }
+        return max(0.05, min(5.0, v))
+    }
+
     private func onHotkeyPressed() {
         actionConsumedForThisPress = false
         pressStart = Date()
 
         cancelLongPressTimer()
+        scheduleLongPressTimer()
+    }
+
+    private func scheduleLongPressTimer() {
         let t = DispatchSource.makeTimerSource(queue: .main)
         t.schedule(deadline: .now() + longPressThreshold)
         t.setEventHandler { [weak self] in
@@ -233,6 +356,13 @@ final class Switcher: ObservableObject {
         }
         t.resume()
         longPressTimer = t
+    }
+
+    private func rescheduleLongPressTimer() {
+        // Called when user changes the delay mid-press
+        cancelLongPressTimer()
+        // Compute remaining time from new threshold if desired; for simplicity, start a fresh timer
+        scheduleLongPressTimer()
     }
 
     private func onHotkeyReleased() {
@@ -264,34 +394,37 @@ final class Switcher: ObservableObject {
         guard !mru.isEmpty else {
             NSLog("MRU empty; nothing to activate.")
             overlay.hide(animated: true)
-            stopKeyMonitoring()
+            removeOverlayEventMonitor()
             return
         }
         let targetIndex = (mru.count > 1) ? 1 : 0
         let target = mru[targetIndex]
         activateApp(target)
         overlay.hide(animated: true)
-        stopKeyMonitoring()
-        clearSearchBuffer()
+        removeOverlayEventMonitor()
     }
 
     private func enterOverlayMode() {
         pruneMRU()
         if mru.isEmpty {
             overlay.hide(animated: true)
-            stopKeyMonitoring()
+            removeOverlayEventMonitor()
             return
         }
-        clearSearchBuffer()
+        // Initialize overlay state
+        overlaySearchText = ""
+        overlayFiltered = mru
+        overlaySelectedIndex = overlayFiltered.isEmpty ? nil : 0
+
         postOverlayEnteredNotification(candidateCount: mru.count)
-        overlay.show(candidates: mru, selectedIndex: nil, searchText: searchBuffer, onSelect: { [weak self] app in
+        overlay.show(candidates: overlayFiltered, selectedIndex: overlaySelectedIndex, searchText: overlaySearchText, showNumberBadges: showNumberBadges, onSelect: { [weak self] app in
             guard let self else { return }
             self.activateApp(app)
             self.overlay.hide(animated: true)
-            self.stopKeyMonitoring()
-            self.clearSearchBuffer()
+            self.removeOverlayEventMonitor()
         })
-        startKeyMonitoring()
+
+        installOverlayEventMonitor()
     }
 
     private func seedMRU() {
@@ -333,9 +466,9 @@ final class Switcher: ObservableObject {
     private func activateApp(_ app: NSRunningApplication) {
         let name = app.localizedName ?? app.bundleIdentifier ?? "App"
 
+        // Avoid deprecated .activateIgnoringOtherApps on macOS 14+; it has no effect.
         let optionSets: [[NSApplication.ActivationOptions]] = [
-            [.activateIgnoringOtherApps],
-            [.activateAllWindows, .activateIgnoringOtherApps],
+            [.activateAllWindows],
             []
         ]
 
@@ -368,101 +501,192 @@ final class Switcher: ObservableObject {
         axUnhideAndRaise(app, appName: name)
     }
 
-    // MARK: - Type-to-select
+    // MARK: - Overlay typing support
 
-    private func startKeyMonitoring() {
-        stopKeyMonitoring()
-        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+    private func installOverlayEventMonitor() {
+        removeOverlayEventMonitor()
+
+        // Local monitor (works when our app is active)
+        overlayEventMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .flagsChanged]) { [weak self] event in
             guard let self else { return event }
-            return self.handleOverlayKeyDown(event: event)
+            switch event.type {
+            case .keyDown:
+                if self.handleOverlayKeyDown(event) {
+                    // Swallow event
+                    return nil
+                }
+                return event
+            default:
+                return event
+            }
+        }
+
+        // Global monitor (works when another app is active)
+        overlayGlobalEventMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.keyDown]) { [weak self] event in
+            guard let self else { return }
+            _ = self.handleOverlayKeyDown(event)
         }
     }
 
-    private func stopKeyMonitoring() {
-        if let keyMonitor {
-            NSEvent.removeMonitor(keyMonitor)
-            self.keyMonitor = nil
+    private func removeOverlayEventMonitor() {
+        if let monitor = overlayEventMonitor {
+            NSEvent.removeMonitor(monitor)
+            overlayEventMonitor = nil
+        }
+        if let global = overlayGlobalEventMonitor {
+            NSEvent.removeMonitor(global)
+            overlayGlobalEventMonitor = nil
         }
     }
 
-    private func handleOverlayKeyDown(event: NSEvent) -> NSEvent? {
-        // Allow arrow keys, tab, etc. to pass through if you later add selection navigation
-        // For now, we consume only text entry keys and delete/escape/return
-        if let chars = event.charactersIgnoringModifiers, !chars.isEmpty {
-            let scalar = chars.unicodeScalars.first!
-            switch scalar {
-            case "\u{7F}": // delete/backspace
-                if !searchBuffer.isEmpty {
-                    searchBuffer.removeLast()
-                    updateOverlaySearchText()
-                    tryUniqueMatch()
-                }
-                return nil
-            case "\u{1B}": // escape
-                if searchBuffer.isEmpty {
-                    // Dismiss overlay if desired; for now just clear
+    private func handleOverlayKeyDown(_ event: NSEvent) -> Bool {
+        // Navigation keys
+        if let charsIgnoringMods = event.charactersIgnoringModifiers, charsIgnoringMods.count == 1 {
+            let c = charsIgnoringMods.unicodeScalars.first!
+            switch c.value {
+            case 0x1B: // Escape
+                if overlaySearchText.isEmpty {
+                    // Cancel overlay
                     overlay.hide(animated: true)
-                    stopKeyMonitoring()
+                    removeOverlayEventMonitor()
+                } else {
+                    overlaySearchText = ""
+                    recomputeOverlayFilterAndUpdate()
                 }
-                clearSearchBuffer()
-                updateOverlaySearchText()
-                return nil
-            case "\r", "\n": // return/enter
-                // If there is a single best match by prefix order, pick it
-                if let match = bestMatch() {
-                    activateApp(match)
+                return true
+            case 0x7F: // Delete (backspace)
+                if !overlaySearchText.isEmpty {
+                    overlaySearchText.removeLast()
+                    recomputeOverlayFilterAndUpdate()
+                }
+                return true
+            case 0x0D, 0x03: // Return / Enter
+                if let idx = overlaySelectedIndex, overlayFiltered.indices.contains(idx) {
+                    let app = overlayFiltered[idx]
+                    activateApp(app)
                     overlay.hide(animated: true)
-                    stopKeyMonitoring()
-                    clearSearchBuffer()
+                    removeOverlayEventMonitor()
                 }
-                return nil
+                return true
             default:
                 break
             }
         }
 
-        // Accept alphanumeric and space
-        if let chars = event.characters, chars.count == 1 {
-            let c = chars.lowercased()
-            if c.range(of: "^[a-z0-9 ]$", options: .regularExpression) != nil {
-                searchBuffer.append(contentsOf: c)
-                updateOverlaySearchText()
-                tryUniqueMatch()
-                return nil
+        // Arrow keys (left/right), tab to cycle
+        if let special = event.specialKey {
+            switch special {
+            case .leftArrow:
+                moveSelection(delta: -1)
+                return true
+            case .rightArrow:
+                moveSelection(delta: 1)
+                return true
+            case .tab:
+                let delta = event.modifierFlags.contains(.shift) ? -1 : 1
+                moveSelection(delta: delta)
+                return true
+            default:
+                break
             }
         }
 
-        return event
-    }
+        // Printable characters -> digits select directly, others build search
+        if let chars = event.characters, !chars.isEmpty {
+            let scalars = chars.unicodeScalars
+            if scalars.count == 1, let digit = scalars.first, ("0"..."9").contains(Character(digit)) {
+                if selectByDigit(Character(digit)) {
+                    return true
+                }
+            }
 
-    private func clearSearchBuffer() {
-        searchBuffer = ""
-    }
-
-    private func updateOverlaySearchText() {
-        overlay.update(candidates: mru, selectedIndex: nil, searchText: searchBuffer)
-    }
-
-    private func normalizedName(for app: NSRunningApplication) -> String {
-        let raw = app.localizedName ?? app.bundleIdentifier ?? ""
-        return raw.lowercased()
-    }
-
-    private func bestMatch() -> NSRunningApplication? {
-        let q = searchBuffer.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        guard !q.isEmpty else { return nil }
-        let matches = mru.filter { normalizedName(for: $0).hasPrefix(q) }
-        if matches.count == 1 { return matches.first }
-        return nil
-    }
-
-    private func tryUniqueMatch() {
-        if let app = bestMatch() {
-            activateApp(app)
-            overlay.hide(animated: true)
-            stopKeyMonitoring()
-            clearSearchBuffer()
+            // Keep only scalars that are reasonably printable
+            let printableScalars = scalars.filter { scalar in
+                switch scalar.properties.generalCategory {
+                case .control, .format, .surrogate, .privateUse, .unassigned:
+                    return false
+                default:
+                    return true
+                }
+            }
+            if !printableScalars.isEmpty {
+                overlaySearchText.append(String(String.UnicodeScalarView(printableScalars)))
+                recomputeOverlayFilterAndUpdate()
+                return true
+            }
         }
+
+        return false
+    }
+
+    // Select an app by typed digit (1-based; 0 means 10)
+    private func selectByDigit(_ ch: Character) -> Bool {
+        guard !overlayFiltered.isEmpty else { return false }
+        let index: Int
+        switch ch {
+        case "1"..."9":
+            index = Int(String(ch))! - 1
+        case "0":
+            index = 9 // 10th item
+        default:
+            return false
+        }
+        guard overlayFiltered.indices.contains(index) else { return false }
+        let app = overlayFiltered[index]
+        activateApp(app)
+        overlay.hide(animated: true)
+        removeOverlayEventMonitor()
+        return true
+    }
+
+    private func moveSelection(delta: Int) {
+        guard !overlayFiltered.isEmpty else { return }
+        let current = overlaySelectedIndex ?? 0
+        let next = (current + delta % overlayFiltered.count + overlayFiltered.count) % overlayFiltered.count
+        overlaySelectedIndex = next
+        overlay.update(candidates: overlayFiltered, selectedIndex: overlaySelectedIndex, searchText: overlaySearchText, showNumberBadges: showNumberBadges)
+    }
+
+    private func recomputeOverlayFilterAndUpdate() {
+        if overlaySearchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            overlayFiltered = mru
+        } else {
+            let needle = overlaySearchText.lowercased()
+            overlayFiltered = mru.filter { app in
+                let name = (app.localizedName ?? app.bundleIdentifier ?? "").lowercased()
+                return matchesWordPrefix(name: name, query: needle)
+            }
+        }
+        overlaySelectedIndex = overlayFiltered.isEmpty ? nil : min(overlaySelectedIndex ?? 0, overlayFiltered.count - 1)
+        overlay.update(candidates: overlayFiltered, selectedIndex: overlaySelectedIndex, searchText: overlaySearchText, showNumberBadges: showNumberBadges)
+
+        // Auto-accept when exactly one candidate remains
+        if overlayFiltered.count == 1, let only = overlayFiltered.first {
+            activateApp(only)
+            overlay.hide(animated: true)
+            removeOverlayEventMonitor()
+        }
+    }
+
+    // Word-prefix matching: every query token must match the start of some word in the name.
+    // Words are split on non-alphanumeric boundaries.
+    private func matchesWordPrefix(name: String, query: String) -> Bool {
+        let nameWords = name.split(whereSeparator: { !$0.isLetter && !$0.isNumber })
+        let queryTokens = query.split(whereSeparator: { $0.isWhitespace || $0 == "-" || $0 == "_" })
+        guard !queryTokens.isEmpty else { return true }
+
+        // Each token must be a prefix of at least one word
+        for token in queryTokens {
+            var matchedThisToken = false
+            for word in nameWords {
+                if word.hasPrefix(token) {
+                    matchedThisToken = true
+                    break
+                }
+            }
+            if !matchedThisToken { return false }
+        }
+        return true
     }
 
     // MARK: - Missing helpers implemented
@@ -510,8 +734,7 @@ final class Switcher: ObservableObject {
 
     private func axUnhideAndRaise(_ app: NSRunningApplication, appName: String) {
         let unhidden = app.unhide()
-        let activated = app.activate(options: [.activateIgnoringOtherApps])
+        let activated = app.activate(options: [])
         NSLog("AX fallback for \(appName): unhide=\(unhidden) activate=\(activated)")
     }
 }
-

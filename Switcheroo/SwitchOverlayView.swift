@@ -5,6 +5,7 @@ struct SwitchOverlayView: View {
     let candidates: [NSRunningApplication]
     let selectedIndex: Int?
     let searchText: String
+    let showNumberBadges: Bool
     let onSelect: (NSRunningApplication) -> Void
 
     private let itemSize: CGFloat = 72
@@ -29,6 +30,7 @@ struct SwitchOverlayView: View {
         .padding(20)
         .fixedSize(horizontal: false, vertical: true)
         .animation(.easeInOut(duration: 0.12), value: searchText)
+        .animation(.easeInOut(duration: 0.12), value: showNumberBadges)
     }
 
     // MARK: - Components
@@ -68,7 +70,7 @@ struct SwitchOverlayView: View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 14) {
                 ForEach(Array(candidates.enumerated()), id: \.1.processIdentifier) { (idx, app) in
-                    itemView(app: app, isSelected: idx == selectedIndex)
+                    itemView(app: app, index: idx, isSelected: idx == selectedIndex)
                         .onTapGesture {
                             onSelect(app)
                         }
@@ -81,9 +83,15 @@ struct SwitchOverlayView: View {
     }
 
     @ViewBuilder
-    private func itemView(app: NSRunningApplication, isSelected: Bool) -> some View {
+    private func itemView(app: NSRunningApplication, index: Int, isSelected: Bool) -> some View {
         VStack(spacing: 8) {
-            iconView(app: app, isSelected: isSelected)
+            ZStack(alignment: .topLeading) {
+                iconView(app: app, isSelected: isSelected)
+                if showNumberBadges && index < 10 {
+                    numberBadge(number: index == 9 ? "0" : "\(index + 1)")
+                        .offset(x: -6, y: -6)
+                }
+            }
             nameView(app: app, isSelected: isSelected)
         }
         .frame(width: itemSize)
@@ -119,5 +127,20 @@ struct SwitchOverlayView: View {
             .frame(width: itemSize)
             .truncationMode(.tail)
     }
-}
 
+    private func numberBadge(number: String) -> some View {
+        Text(number)
+            .font(.system(size: 11, weight: .bold, design: .rounded))
+            .foregroundStyle(.white)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(
+                Capsule(style: .continuous)
+                    .fill(Color.black.opacity(0.55))
+                    .overlay(
+                        Capsule(style: .continuous)
+                            .stroke(.white.opacity(0.25), lineWidth: 1)
+                    )
+            )
+    }
+}
