@@ -28,6 +28,9 @@ struct SwitcherooApp: App {
                 // Number badges toggle
                 NumberBadgesSettingsView()
 
+                // Auto-select single match toggle
+                AutoSelectSingleResultSettingsView()
+
                 Spacer()
 
                 Text("Tip: If media keys adjust volume, enable “Use F1, F2, etc. keys as standard function keys” or hold Fn while pressing function keys.\nAccessibility permission may be requested for full control features.")
@@ -150,21 +153,18 @@ struct ShortcutSettingsView: View {
             HStack(spacing: 12) {
                 ShortcutRecorder(shortcut: $current)
                     .frame(width: 180)
-                Button("Save") {
-                    current.save()
-                    Switcher.shared.applyShortcut(current)
-                }
-                Button("Reset") {
-                    current = .default
-                    current.save()
-                    Switcher.shared.applyShortcut(current)
-                }
+
                 Text("Current: \(current.displayString)")
                     .foregroundStyle(.secondary)
             }
         }
         .onAppear {
             current = Shortcut.load()
+        }
+        .onChange(of: current) { _, new in
+            // Auto-save and apply whenever a new shortcut is recorded
+            new.save()
+            Switcher.shared.applyShortcut(new)
         }
     }
 }
@@ -175,7 +175,7 @@ struct LongPressDelaySettingsView: View {
     @ObservedObject private var switcher = Switcher.shared
     @State private var tempDelay: Double = Switcher.shared.longPressThreshold
 
-    private let range: ClosedRange<Double> = 0.2...2.0
+    private let range: ClosedRange<Double> = 0...3.0
     private let step: Double = 0.05
 
     var body: some View {
@@ -202,11 +202,6 @@ struct LongPressDelaySettingsView: View {
                     .monospacedDigit()
                     .frame(width: 56, alignment: .trailing)
                     .foregroundStyle(.secondary)
-
-                Button("Reset") {
-                    tempDelay = Switcher.defaultLongPressDelay
-                    apply()
-                }
             }
             .onAppear {
                 tempDelay = switcher.longPressThreshold
@@ -234,6 +229,20 @@ struct NumberBadgesSettingsView: View {
     }
 }
 
+// MARK: - Auto-select single result settings UI
+
+struct AutoSelectSingleResultSettingsView: View {
+    @ObservedObject private var switcher = Switcher.shared
+
+    var body: some View {
+        Toggle("Auto-select when only one match remains", isOn: Binding(
+            get: { switcher.autoSelectSingleResult },
+            set: { Switcher.shared.setAutoSelectSingleResult($0) }
+        ))
+        .toggleStyle(.switch)
+    }
+}
+
 // MARK: - Switcher Core
 
 final class Switcher: ObservableObject {
@@ -243,6 +252,8 @@ final class Switcher: ObservableObject {
         self.longPressThreshold = Self.loadPersistedLongPressDelay()
         // Load persisted number badges preference
         self.showNumberBadges = UserDefaults.standard.object(forKey: Self.numberBadgesDefaultsKey) as? Bool ?? true
+        // Load persisted auto-select preference
+        self.autoSelectSingleResult = UserDefaults.standard.object(forKey: Self.autoSelectDefaultsKey) as? Bool ?? true
     }
 
     @Published var backgroundColor: Color = Color(NSColor.windowBackgroundColor)
@@ -255,6 +266,10 @@ final class Switcher: ObservableObject {
     // Number badges preference
     @Published private(set) var showNumberBadges: Bool
     private static let numberBadgesDefaultsKey = "ShowNumberBadges"
+
+    // Auto-select when only one result remains
+    @Published private(set) var autoSelectSingleResult: Bool
+    private static let autoSelectDefaultsKey = "AutoSelectSingleResult"
 
     private var pressStart: Date?
     private var longPressTimer: DispatchSourceTimer?
@@ -275,6 +290,9 @@ final class Switcher: ObservableObject {
     private var overlaySelectedIndex: Int? = nil
     private var overlayEventMonitor: Any?
     private var overlayGlobalEventMonitor: Any? // NEW: global key monitor
+
+    // Track which app was focused when overlay was opened
+    private var overlayOriginApp: NSRunningApplication?
 
     func start() {
         requestNotificationAuthorization()
@@ -313,7 +331,6 @@ final class Switcher: ObservableObject {
         longPressThreshold = clamped
         UserDefaults.standard.set(clamped, forKey: Self.longPressDefaultsKey)
 
-        // If a long-press is currently pending, reschedule to respect the new delay
         if pressStart != nil {
             rescheduleLongPressTimer()
         }
@@ -323,8 +340,13 @@ final class Switcher: ObservableObject {
         guard show != showNumberBadges else { return }
         showNumberBadges = show
         UserDefaults.standard.set(show, forKey: Self.numberBadgesDefaultsKey)
-        // If overlay is visible, refresh it to reflect the new setting
         overlay.update(candidates: overlayFiltered, selectedIndex: overlaySelectedIndex, searchText: overlaySearchText, showNumberBadges: showNumberBadges)
+    }
+
+    func setAutoSelectSingleResult(_ enabled: Bool) {
+        guard enabled != autoSelectSingleResult else { return }
+        autoSelectSingleResult = enabled
+        UserDefaults.standard.set(enabled, forKey: Self.autoSelectDefaultsKey)
     }
 
     private static func loadPersistedLongPressDelay() -> TimeInterval {
@@ -335,10 +357,42 @@ final class Switcher: ObservableObject {
         return max(0.05, min(5.0, v))
     }
 
+    private func overlayIsVisible() -> Bool {
+        overlayEventMonitor != nil || overlayGlobalEventMonitor != nil
+    }
+
     private func onHotkeyPressed() {
+        // If overlay is open, start a long-press that will cancel overlay; a tap will advance selection.
+        if overlayIsVisible() {
+            actionConsumedForThisPress = false
+            pressStart = Date()
+
+            cancelLongPressTimer()
+            // Special long-press behavior while overlay is visible: cancel overlay and restore focus
+            let t = DispatchSource.makeTimerSource(queue: .main)
+            t.schedule(deadline: .now() + longPressThreshold)
+            t.setEventHandler { [weak self] in
+                guard let self else { return }
+                self.cancelLongPressTimer()
+                if self.actionConsumedForThisPress == false {
+                    // Long-press while overlay visible -> cancel and restore original app
+                    self.overlay.hide(animated: true)
+                    self.removeOverlayEventMonitor()
+                    if let origin = self.overlayOriginApp {
+                        _ = origin.activate(options: [])
+                    }
+                    self.overlayOriginApp = nil
+                    self.actionConsumedForThisPress = true
+                }
+            }
+            t.resume()
+            longPressTimer = t
+            return
+        }
+
+        // Normal behavior when overlay not visible
         actionConsumedForThisPress = false
         pressStart = Date()
-
         cancelLongPressTimer()
         scheduleLongPressTimer()
     }
@@ -359,9 +413,7 @@ final class Switcher: ObservableObject {
     }
 
     private func rescheduleLongPressTimer() {
-        // Called when user changes the delay mid-press
         cancelLongPressTimer()
-        // Compute remaining time from new threshold if desired; for simplicity, start a fresh timer
         scheduleLongPressTimer()
     }
 
@@ -375,6 +427,15 @@ final class Switcher: ObservableObject {
             return
         }
 
+        // If overlay is visible, a tap (short press) advances selection to next candidate
+        if overlayIsVisible(), elapsed < longPressThreshold {
+            moveSelection(delta: 1)
+            actionConsumedForThisPress = true
+            actionConsumedForThisPress = false
+            return
+        }
+
+        // Normal quick-tap behavior when overlay is not visible: restore previous app
         if elapsed < longPressThreshold {
             restorePreviousApp()
             actionConsumedForThisPress = true
@@ -389,7 +450,6 @@ final class Switcher: ObservableObject {
 
     private func restorePreviousApp() {
         postDebugNotification()
-        updateBackgroundColor()
         pruneMRU()
         guard !mru.isEmpty else {
             NSLog("MRU empty; nothing to activate.")
@@ -416,12 +476,16 @@ final class Switcher: ObservableObject {
         overlayFiltered = mru
         overlaySelectedIndex = overlayFiltered.isEmpty ? nil : 0
 
+        // Remember which app was focused before showing overlay
+        overlayOriginApp = NSWorkspace.shared.frontmostApplication
+
         postOverlayEnteredNotification(candidateCount: mru.count)
         overlay.show(candidates: overlayFiltered, selectedIndex: overlaySelectedIndex, searchText: overlaySearchText, showNumberBadges: showNumberBadges, onSelect: { [weak self] app in
             guard let self else { return }
             self.activateApp(app)
             self.overlay.hide(animated: true)
             self.removeOverlayEventMonitor()
+            self.overlayOriginApp = nil
         })
 
         installOverlayEventMonitor()
@@ -549,6 +613,11 @@ final class Switcher: ObservableObject {
                     // Cancel overlay
                     overlay.hide(animated: true)
                     removeOverlayEventMonitor()
+                    // Restore focus to original app
+                    if let origin = overlayOriginApp {
+                        _ = origin.activate(options: [])
+                    }
+                    overlayOriginApp = nil
                 } else {
                     overlaySearchText = ""
                     recomputeOverlayFilterAndUpdate()
@@ -566,6 +635,7 @@ final class Switcher: ObservableObject {
                     activateApp(app)
                     overlay.hide(animated: true)
                     removeOverlayEventMonitor()
+                    overlayOriginApp = nil
                 }
                 return true
             default:
@@ -636,6 +706,7 @@ final class Switcher: ObservableObject {
         activateApp(app)
         overlay.hide(animated: true)
         removeOverlayEventMonitor()
+        overlayOriginApp = nil
         return true
     }
 
@@ -660,11 +731,12 @@ final class Switcher: ObservableObject {
         overlaySelectedIndex = overlayFiltered.isEmpty ? nil : min(overlaySelectedIndex ?? 0, overlayFiltered.count - 1)
         overlay.update(candidates: overlayFiltered, selectedIndex: overlaySelectedIndex, searchText: overlaySearchText, showNumberBadges: showNumberBadges)
 
-        // Auto-accept when exactly one candidate remains
-        if overlayFiltered.count == 1, let only = overlayFiltered.first {
+        // Auto-accept when exactly one candidate remains (if enabled)
+        if autoSelectSingleResult && overlayFiltered.count == 1, let only = overlayFiltered.first {
             activateApp(only)
             overlay.hide(animated: true)
             removeOverlayEventMonitor()
+            overlayOriginApp = nil
         }
     }
 
@@ -723,12 +795,6 @@ final class Switcher: ObservableObject {
             if let error {
                 NSLog("postOverlayEnteredNotification failed: \(error.localizedDescription)")
             }
-        }
-    }
-
-    private func updateBackgroundColor() {
-        DispatchQueue.main.async {
-            self.backgroundColor = Color(NSColor.windowBackgroundColor)
         }
     }
 
