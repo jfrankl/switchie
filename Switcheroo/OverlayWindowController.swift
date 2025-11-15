@@ -9,6 +9,9 @@ final class OverlayWindowController {
     // Selection callback provided by Switcher
     private var onSelect: ((NSRunningApplication) -> Void)?
 
+    // Track the previously active app if you want to restore focus on cancel
+    private var previouslyActiveApp: NSRunningApplication?
+
     init() {}
 
     func show(candidates: [NSRunningApplication], selectedIndex: Int?, searchText: String, showNumberBadges: Bool, onSelect: @escaping (NSRunningApplication) -> Void) {
@@ -17,6 +20,9 @@ final class OverlayWindowController {
             createWindow()
         }
         self.onSelect = onSelect
+
+        // Remember who was active before we steal focus (optional but nice to have)
+        previouslyActiveApp = NSWorkspace.shared.frontmostApplication
 
         // Ensure sane state before showing
         window?.alphaValue = 1.0
@@ -32,6 +38,10 @@ final class OverlayWindowController {
         // Make sure it’s not miniaturized and fully visible
         window?.miniwindowTitle = ""
         window?.deminiaturize(nil)
+
+        // Bring Switcheroo to the front so it can receive key events
+        // Note: the 'ignoringOtherApps' parameter is ignored on macOS 14+, but the call still activates us.
+        NSApp.activate(ignoringOtherApps: true)
 
         // Order front above all regardless of app activation state
         if let panel = window as? NSPanel {
