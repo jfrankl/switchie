@@ -19,9 +19,15 @@ struct SwitchOverlayView: View {
             VStack(spacing: 12) {
                 if !searchText.isEmpty {
                     searchBadge
-                        .transition(.opacity.combined(with: .move(edge: .top)))
+                        .transition(.opacity .combined(with: .move(edge: .top)))
                 }
-                itemsScrollView
+
+                if candidates.isEmpty {
+                    emptyStateView
+                        .transition(.opacity)
+                } else {
+                    itemsScrollView
+                }
             }
             .padding(.top, 8)
             .padding(.bottom, 6)
@@ -31,6 +37,7 @@ struct SwitchOverlayView: View {
         .fixedSize(horizontal: false, vertical: true)
         .animation(.easeInOut(duration: 0.12), value: searchText)
         .animation(.easeInOut(duration: 0.12), value: showNumberBadges)
+        .animation(.easeInOut(duration: 0.12), value: candidates.count)
     }
 
     // MARK: - Components
@@ -80,6 +87,40 @@ struct SwitchOverlayView: View {
         }
         .frame(minHeight: 120)
         .padding(6)
+    }
+
+    // Empty state shown when no apps match the current filter
+    private var emptyStateView: some View {
+        VStack(spacing: 14) {
+            // Fun illustration
+            Image(systemName: "binoculars")
+                .symbolRenderingMode(.hierarchical)
+                .font(.system(size: 56, weight: .regular))
+                .foregroundStyle(.secondary)
+
+            // Title
+            Text("No applications found")
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(.primary)
+
+            // Message depending on whether there is a query
+            Text(emptyStateMessage)
+                .font(.system(size: 12))
+                .multilineTextAlignment(.center)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: 360)
+        }
+        .padding(.vertical, 24)
+        .padding(.horizontal, 12)
+        .frame(minHeight: 120) // take up similar vertical space as the items list
+    }
+
+    private var emptyStateMessage: String {
+        if searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return "There are no applications to display right now."
+        } else {
+            return "No applications match “\(searchText)”. Try a different name or clear the search."
+        }
     }
 
     @ViewBuilder
