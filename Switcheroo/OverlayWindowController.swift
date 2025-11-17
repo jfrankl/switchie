@@ -41,6 +41,9 @@ final class OverlayWindowController {
     // Track the previously active app if you want to restore focus on cancel
     private var previouslyActiveApp: NSRunningApplication?
 
+    // Track the width constraint so we can update it per screen size
+    private var hostingMaxWidthConstraint: NSLayoutConstraint?
+
     init() {}
 
     func show(candidates: [NSRunningApplication], selectedIndex: Int?, searchText: String, showNumberBadges: Bool, onSelect: @escaping (NSRunningApplication) -> Void) {
@@ -187,14 +190,17 @@ final class OverlayWindowController {
         win.contentView?.wantsLayer = true
         win.contentView?.addSubview(hosting)
 
+        // Create a max-width constraint we can update per screen size
+        let maxWidthConstraint = hosting.widthAnchor.constraint(lessThanOrEqualToConstant: 980)
         NSLayoutConstraint.activate([
             hosting.centerXAnchor.constraint(equalTo: win.contentView!.centerXAnchor),
             hosting.centerYAnchor.constraint(equalTo: win.contentView!.centerYAnchor),
-            hosting.widthAnchor.constraint(lessThanOrEqualToConstant: 980)
+            maxWidthConstraint
         ])
 
         self.window = win
         self.hosting = hosting
+        self.hostingMaxWidthConstraint = maxWidthConstraint
 
         screenObserver = NotificationCenter.default.addObserver(
             forName: NSApplication.didChangeScreenParametersNotification,
@@ -247,19 +253,27 @@ final class OverlayWindowController {
         let screen = NSScreen.main ?? NSScreen.screens.first
         guard let screen else { return }
 
+        // Compute the desired max width: visible frame minus 23px margins on each side.
+        let visible = screen.visibleFrame
+        let maxWidth = max(320, visible.width - 46) // keep a sensible lower bound
+
+        // Update the hosting width constraint to reflect current screen
+        if let maxWidthConstraint = hostingMaxWidthConstraint {
+            maxWidthConstraint.constant = maxWidth
+        }
+
         let targetSize: NSSize
         if let hosting = hosting {
             let intrinsic = hosting.intrinsicContentSize
-            let width = max(320, min(intrinsic.width > 0 ? intrinsic.width : 600, 980))
+            let width = max(320, min(intrinsic.width > 0 ? intrinsic.width : 600, maxWidth))
             let height = max(120, intrinsic.height > 0 ? intrinsic.height : 200)
             targetSize = NSSize(width: width, height: height)
         } else {
-            targetSize = NSSize(width: 600, height: 200)
+            targetSize = NSSize(width: min(600, maxWidth), height: 200)
         }
 
-        let screenFrame = screen.visibleFrame
-        let x = screenFrame.midX - targetSize.width / 2
-        let y = screenFrame.midY - targetSize.height / 2
+        let x = visible.midX - targetSize.width / 2
+        let y = visible.midY - targetSize.height / 2
         let frame = NSRect(x: x, y: y, width: targetSize.width, height: targetSize.height)
 
         win.setFrame(frame, display: true)
@@ -309,4 +323,3 @@ private final class NonActivatingPanel: NSPanel {
 
     override func makeKey() { }
 }
-
