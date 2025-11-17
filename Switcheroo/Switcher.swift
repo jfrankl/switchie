@@ -9,6 +9,8 @@ final class Switcher: ObservableObject {
         self.showNumberBadges = UserDefaults.standard.object(forKey: Self.numberBadgesDefaultsKey) as? Bool ?? true
         self.autoSelectSingleResult = UserDefaults.standard.object(forKey: Self.autoSelectDefaultsKey) as? Bool ?? true
         self.windowCycleShortcut = Self.loadWindowCycleShortcut()
+        self.overlaySelectShortcut = Self.loadOverlaySelectShortcut()
+        self.overlayQuitShortcut = Self.loadOverlayQuitShortcut()
     }
 
     @Published var backgroundColor: Color = Color(NSColor.windowBackgroundColor)
@@ -36,6 +38,9 @@ final class Switcher: ObservableObject {
 
     @Published private(set) var windowCycleShortcut: Shortcut
 
+    @Published private(set) var overlaySelectShortcut: Shortcut
+    @Published private(set) var overlayQuitShortcut: Shortcut
+
     private var overlaySearchText: String = ""
     private var overlayFiltered: [NSRunningApplication] = []
     private var overlaySelectedIndex: Int? = nil
@@ -58,6 +63,8 @@ final class Switcher: ObservableObject {
         shortcut = Shortcut.load()
         applyAppSwitchShortcut(shortcut)
         applyWindowCycleShortcut(windowCycleShortcut)
+        Self.saveOverlaySelectShortcut(overlaySelectShortcut)
+        Self.saveOverlayQuitShortcut(overlayQuitShortcut)
 
         activationObserver = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didActivateApplicationNotification,
@@ -95,6 +102,16 @@ final class Switcher: ObservableObject {
                 break
             }
         }
+    }
+
+    func applyOverlaySelectShortcut(_ s: Shortcut) {
+        overlaySelectShortcut = s
+        Self.saveOverlaySelectShortcut(s)
+    }
+
+    func applyOverlayQuitShortcut(_ s: Shortcut) {
+        overlayQuitShortcut = s
+        Self.saveOverlayQuitShortcut(s)
     }
 
     func applyLongPressDelay(_ value: TimeInterval) {
@@ -140,6 +157,40 @@ final class Switcher: ObservableObject {
     private static func saveWindowCycleShortcut(_ s: Shortcut) {
         if let data = try? JSONEncoder().encode(s) {
             UserDefaults.standard.set(data, forKey: windowCycleDefaultsKey)
+        }
+    }
+
+    private static let overlaySelectDefaultsKey = "OverlaySelectShortcut"
+    private static let overlayQuitDefaultsKey = "OverlayQuitShortcut"
+
+    private static var defaultOverlaySelect: Shortcut { Shortcut(keyCode: 36, modifiers: []) }
+    private static var defaultOverlayQuit: Shortcut { Shortcut(keyCode: 12, modifiers: [.command]) }
+
+    private static func loadOverlaySelectShortcut() -> Shortcut {
+        if let data = UserDefaults.standard.data(forKey: overlaySelectDefaultsKey),
+           let s = try? JSONDecoder().decode(Shortcut.self, from: data) {
+            return s
+        }
+        return defaultOverlaySelect
+    }
+
+    private static func saveOverlaySelectShortcut(_ s: Shortcut) {
+        if let data = try? JSONEncoder().encode(s) {
+            UserDefaults.standard.set(data, forKey: overlaySelectDefaultsKey)
+        }
+    }
+
+    private static func loadOverlayQuitShortcut() -> Shortcut {
+        if let data = UserDefaults.standard.data(forKey: overlayQuitDefaultsKey),
+           let s = try? JSONDecoder().decode(Shortcut.self, from: data) {
+            return s
+        }
+        return defaultOverlayQuit
+    }
+
+    private static func saveOverlayQuitShortcut(_ s: Shortcut) {
+        if let data = try? JSONEncoder().encode(s) {
+            UserDefaults.standard.set(data, forKey: overlayQuitDefaultsKey)
         }
     }
 
@@ -373,7 +424,29 @@ final class Switcher: ObservableObject {
         }
     }
 
+    private func eventToShortcut(_ event: NSEvent) -> Shortcut {
+        let keyCode = UInt32(event.keyCode)
+        let mods = event.modifierFlags.intersection([.command, .option, .control, .shift, .capsLock, .function])
+        return Shortcut(keyCode: keyCode, modifiers: mods)
+    }
+
     private func handleOverlayKeyDown(_ event: NSEvent) -> Bool {
+        let asShortcut = eventToShortcut(event)
+
+        if asShortcut == overlaySelectShortcut {
+            if let idx = overlaySelectedIndex, overlayFiltered.indices.contains(idx) {
+                let app = overlayFiltered[idx]
+                activateApp(app)
+                hideOverlayAndCleanup(reactivateOrigin: false)
+            }
+            return true
+        }
+
+        if asShortcut == overlayQuitShortcut {
+            quitSelectedAppAndStay()
+            return true
+        }
+
         if let charsIgnoringMods = event.charactersIgnoringModifiers, charsIgnoringMods.count == 1 {
             let c = charsIgnoringMods.unicodeScalars.first!
             switch c.value {
@@ -389,13 +462,6 @@ final class Switcher: ObservableObject {
                 if !overlaySearchText.isEmpty {
                     overlaySearchText.removeLast()
                     recomputeOverlayFilterAndUpdate()
-                }
-                return true
-            case 0x0D, 0x03:
-                if let idx = overlaySelectedIndex, overlayFiltered.indices.contains(idx) {
-                    let app = overlayFiltered[idx]
-                    activateApp(app)
-                    hideOverlayAndCleanup(reactivateOrigin: false)
                 }
                 return true
             default:
@@ -435,6 +501,37 @@ final class Switcher: ObservableObject {
         }
 
         return false
+    }
+
+    private func quitSelectedAppAndStay() {
+        guard let idx = overlaySelectedIndex, overlayFiltered.indices.contains(idx) else { return }
+        let app = overlayFiltered[idx]
+        let name = app.localizedName ?? app.bundleIdentifier ?? "App"
+        NSLog("Attempting to quit \(name)")
+
+        _ = app.terminate()
+
+        removeAppFromLists(app)
+
+        overlay.showToast("Quit \(name)")
+
+        overlay.update(candidates: overlayFiltered, selectedIndex: overlaySelectedIndex, searchText: overlaySearchText, showNumberBadges: showNumberBadges)
+    }
+
+    private func removeAppFromLists(_ app: NSRunningApplication) {
+        mru.removeAll { $0.processIdentifier == app.processIdentifier }
+
+        let wasIndex = overlaySelectedIndex
+        overlayFiltered.removeAll { $0.processIdentifier == app.processIdentifier }
+
+        if overlayFiltered.isEmpty {
+            overlaySelectedIndex = nil
+        } else if let wasIndex {
+            let newIndex = min(wasIndex, overlayFiltered.count - 1)
+            overlaySelectedIndex = max(0, newIndex)
+        } else {
+            overlaySelectedIndex = 0
+        }
     }
 
     private func selectByDigit(_ ch: Character) -> Bool {
@@ -594,3 +691,4 @@ final class Switcher: ObservableObject {
         _ = app.activate(options: [])
     }
 }
+

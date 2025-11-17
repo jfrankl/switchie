@@ -5,6 +5,10 @@ struct ShortcutsSection: View {
     @State private var appSwitch = Shortcut.load()
     @State private var windowCycle: Shortcut = .default
 
+    // New state for overlay actions
+    @State private var overlaySelect: Shortcut = Shortcut(keyCode: 36, modifiers: [])
+    @State private var overlayQuit: Shortcut = Shortcut(keyCode: 12, modifiers: [.command])
+
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 12) {
@@ -27,12 +31,33 @@ struct ShortcutsSection: View {
                             switcher.applyWindowCycleShortcut(new)
                         }
                 }
+                GridRow {
+                    Text("Select highlighted app")
+                        .gridLabel()
+                    ShortcutPicker(shortcut: $overlaySelect)
+                        .frame(width: 220)
+                        .onChange(of: overlaySelect) { _, new in
+                            switcher.applyOverlaySelectShortcut(new)
+                        }
+                }
+                GridRow {
+                    Text("Quit selected app")
+                        .gridLabel()
+                    ShortcutPicker(shortcut: $overlayQuit)
+                        .frame(width: 220)
+                        .onChange(of: overlayQuit) { _, new in
+                            switcher.applyOverlayQuitShortcut(new)
+                        }
+                }
                 Divider().opacity(0.25).padding(.vertical, 6)
             }
         }
         .onAppear {
             appSwitch = Shortcut.load()
             windowCycle = switcher.windowCycleShortcut
+            overlaySelect = switcher.overlaySelectShortcut
+            overlayQuit = switcher.overlayQuitShortcut
         }
     }
 }
+

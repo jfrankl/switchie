@@ -1,10 +1,39 @@
 import AppKit
 import SwiftUI
 
+private struct ToastView: View {
+    let text: String
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "checkmark.circle.fill")
+                .imageScale(.medium)
+            Text(text)
+                .font(.system(size: 12, weight: .semibold))
+        }
+        .foregroundStyle(.white)
+        .padding(.vertical, 8)
+        .padding(.horizontal, 12)
+        .background(
+            Capsule(style: .continuous)
+                .fill(Color.black.opacity(0.7))
+                .overlay(
+                    Capsule(style: .continuous)
+                        .stroke(.white.opacity(0.25), lineWidth: 1)
+                )
+        )
+    }
+}
+
 final class OverlayWindowController {
     private var window: NSWindow?
     private var hosting: NSHostingView<SwitchOverlayView>?
     private var screenObserver: Any?
+
+    // Separate toast panel
+    private var toastWindow: NSWindow?
+    private var toastHosting: NSHostingView<ToastView>?
+    private var toastHideWorkItem: DispatchWorkItem?
 
     // Selection callback provided by Switcher
     private var onSelect: ((NSRunningApplication) -> Void)?
@@ -16,70 +45,99 @@ final class OverlayWindowController {
 
     func show(candidates: [NSRunningApplication], selectedIndex: Int?, searchText: String, showNumberBadges: Bool, onSelect: @escaping (NSRunningApplication) -> Void) {
         if window == nil {
-            print("[Overlay] createWindow() (lazy)")
             createWindow()
         }
         self.onSelect = onSelect
 
-        // Remember who was active before we steal focus (optional but nice to have)
         previouslyActiveApp = NSWorkspace.shared.frontmostApplication
 
-        // Ensure sane state before showing
         window?.alphaValue = 1.0
         window?.isOpaque = false
         window?.isReleasedWhenClosed = false
 
-        print("[Overlay] show() appActive=\(NSApp.isActive) candidates=\(candidates.count) selectedIndex=\(String(describing: selectedIndex))")
         update(candidates: candidates, selectedIndex: selectedIndex, searchText: searchText, showNumberBadges: showNumberBadges)
 
-        // Re-center just before showing in case screens/spaces changed
         centerOnActiveScreen()
 
-        // Make sure it’s not miniaturized and fully visible
         window?.miniwindowTitle = ""
         window?.deminiaturize(nil)
 
-        // Bring Switcheroo to the front so it can receive key events
-        // Note: the 'ignoringOtherApps' parameter is ignored on macOS 14+, but the call still activates us.
         NSApp.activate(ignoringOtherApps: true)
 
-        // Order front above all regardless of app activation state
         if let panel = window as? NSPanel {
             panel.orderFrontRegardless()
         } else {
             window?.orderFrontRegardless()
         }
 
-        // Force a re-raise to combat background stacking quirks
         if let win = window {
             let currentLevel = win.level
             win.level = NSWindow.Level(rawValue: currentLevel.rawValue + 1)
             win.level = currentLevel
         }
-
-        print("[Overlay] show() ordered front. isVisible=\(window?.isVisible ?? false) alpha=\(window?.alphaValue ?? -1) level=\(window?.level.rawValue ?? -1)")
     }
 
     func update(candidates: [NSRunningApplication], selectedIndex: Int?, searchText: String, showNumberBadges: Bool) {
-        guard let hosting else {
-            print("[Overlay] update() skipped: hosting nil")
-            return
-        }
+        guard let hosting else { return }
         let view = SwitchOverlayView(candidates: candidates, selectedIndex: selectedIndex, searchText: searchText, showNumberBadges: showNumberBadges, onSelect: { [weak self] app in
             self?.onSelect?(app)
         })
         hosting.rootView = view
-        print("[Overlay] update() applied rootView. Intrinsic size = \(hosting.intrinsicContentSize)")
         centerOnActiveScreen()
     }
 
-    func hide(animated: Bool = true) {
-        guard let window else {
-            print("[Overlay] hide() skipped: no window")
-            return
+    func showToast(_ text: String, duration: TimeInterval = 1.5) {
+        if toastWindow == nil {
+            createToastWindow()
         }
+
+        // Replace content
+        if let toastHosting {
+            toastHosting.rootView = ToastView(text: text)
+        }
+
+        // Position bottom center of active screen
+        positionToast()
+
+        // Show
+        if let panel = toastWindow as? NSPanel {
+            panel.orderFrontRegardless()
+        } else {
+            toastWindow?.orderFrontRegardless()
+        }
+        toastWindow?.alphaValue = 1.0
+
+        // Schedule hide
+        toastHideWorkItem?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            self?.hideToast(animated: true)
+        }
+        toastHideWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + duration, execute: work)
+    }
+
+    func hideToast(animated: Bool) {
+        guard let toastWindow else { return }
+        toastHideWorkItem?.cancel()
+        toastHideWorkItem = nil
+
         if animated {
-            print("[Overlay] hide(animated) begin")
+            NSAnimationContext.runAnimationGroup { ctx in
+                ctx.duration = 0.15
+                toastWindow.animator().alphaValue = 0
+            } completionHandler: {
+                toastWindow.orderOut(nil)
+                toastWindow.alphaValue = 1.0
+            }
+        } else {
+            toastWindow.orderOut(nil)
+            toastWindow.alphaValue = 1.0
+        }
+    }
+
+    func hide(animated: Bool = true) {
+        guard let window else { return }
+        if animated {
             NSAnimationContext.runAnimationGroup { ctx in
                 ctx.duration = 0.12
                 window.animator().alphaValue = 0
@@ -87,14 +145,13 @@ final class OverlayWindowController {
                 DispatchQueue.main.async {
                     window.orderOut(nil)
                     window.alphaValue = 1.0
-                    print("[Overlay] hide(animated) completed. isVisible=\(window.isVisible)")
                 }
             }
         } else {
-            print("[Overlay] hide() immediate")
             window.orderOut(nil)
             window.alphaValue = 1.0
         }
+        hideToast(animated: false)
     }
 
     private func createWindow() {
@@ -102,7 +159,6 @@ final class OverlayWindowController {
         let hosting = NSHostingView(rootView: content)
         hosting.translatesAutoresizingMaskIntoConstraints = false
 
-        // Non-activating, transparent panel with strongest always-on-top level
         let win = NonActivatingPanel(
             contentRect: NSRect(x: 0, y: 0, width: 600, height: 200),
             styleMask: [.borderless, .nonactivatingPanel],
@@ -110,15 +166,12 @@ final class OverlayWindowController {
             defer: false
         )
 
-        // Strongest practical "always on top" level
         win.level = .screenSaver
-
         win.isOpaque = false
         win.backgroundColor = .clear
         win.hasShadow = false
-        win.ignoresMouseEvents = false // allow clicking icons
+        win.ignoresMouseEvents = false
 
-        // Behaviors to appear across spaces/full-screen and remain stationary
         win.collectionBehavior = [
             .canJoinAllSpaces,
             .fullScreenAuxiliary,
@@ -143,27 +196,56 @@ final class OverlayWindowController {
         self.window = win
         self.hosting = hosting
 
-        print("[Overlay] createWindow() done. level=\(win.level.rawValue) ignoresMouse=\(win.ignoresMouseEvents) behaviors=\(win.collectionBehavior)")
-
         screenObserver = NotificationCenter.default.addObserver(
             forName: NSApplication.didChangeScreenParametersNotification,
             object: nil,
             queue: .main
         ) { [weak self] _ in
             self?.centerOnActiveScreen()
+            self?.positionToast()
         }
 
         centerOnActiveScreen()
     }
 
+    private func createToastWindow() {
+        let view = ToastView(text: "")
+        let hosting = NSHostingView(rootView: view)
+        hosting.translatesAutoresizingMaskIntoConstraints = false
+
+        let win = NonActivatingPanel(
+            contentRect: NSRect(x: 0, y: 0, width: 10, height: 10),
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false
+        )
+        win.level = .screenSaver
+        win.isOpaque = false
+        win.backgroundColor = .clear
+        win.hasShadow = false
+        win.ignoresMouseEvents = true
+        win.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .ignoresCycle, .stationary]
+        win.titleVisibility = .hidden
+        win.titlebarAppearsTransparent = true
+
+        let container = NSView()
+        container.wantsLayer = true
+        win.contentView = container
+        container.addSubview(hosting)
+
+        NSLayoutConstraint.activate([
+            hosting.centerXAnchor.constraint(equalTo: container.centerXAnchor),
+            hosting.centerYAnchor.constraint(equalTo: container.centerYAnchor)
+        ])
+
+        self.toastWindow = win
+        self.toastHosting = hosting
+    }
+
     private func centerOnActiveScreen() {
         guard let win = window else { return }
-        let mainScreen = NSScreen.main
-        let firstScreen = NSScreen.screens.first
-        guard let screen = mainScreen ?? firstScreen else {
-            print("[Overlay] centerOnActiveScreen(): no screens?")
-            return
-        }
+        let screen = NSScreen.main ?? NSScreen.screens.first
+        guard let screen else { return }
 
         let targetSize: NSSize
         if let hosting = hosting {
@@ -181,14 +263,30 @@ final class OverlayWindowController {
         let frame = NSRect(x: x, y: y, width: targetSize.width, height: targetSize.height)
 
         win.setFrame(frame, display: true)
-        print("[Overlay] centerOnActiveScreen() centered panel. windowFrame=\(win.frame)")
+    }
+
+    private func positionToast() {
+        guard let toastWindow else { return }
+        let screen = NSScreen.main ?? NSScreen.screens.first
+        guard let screen else { return }
+
+        // Measure current toast content size
+        let size = toastHosting?.intrinsicContentSize ?? NSSize(width: 200, height: 36)
+        let padding: CGFloat = 28
+        let yOffset: CGFloat = 36 // distance from bottom edge
+
+        let screenFrame = screen.visibleFrame
+        let x = screenFrame.midX - size.width / 2
+        let y = screenFrame.minY + yOffset
+
+        let frame = NSRect(x: x, y: y, width: size.width + padding, height: size.height + 8)
+        toastWindow.setFrame(frame, display: true)
     }
 
     deinit {
         if let screenObserver {
             NotificationCenter.default.removeObserver(screenObserver)
         }
-        print("[Overlay] deinit")
     }
 }
 
@@ -198,7 +296,6 @@ private final class NonActivatingPanel: NSPanel {
     override var canBecomeMain: Bool { false }
 
     override init(contentRect: NSRect, styleMask style: NSWindow.StyleMask, backing bufferingType: NSWindow.BackingStoreType, defer flag: Bool) {
-        // Ensure .nonactivatingPanel remains set
         var mask = style
         mask.insert(.nonactivatingPanel)
         super.init(contentRect: contentRect, styleMask: mask, backing: bufferingType, defer: flag)
@@ -206,17 +303,10 @@ private final class NonActivatingPanel: NSPanel {
         worksWhenModal = false
     }
 
-    // Swallow keying attempts to avoid AppKit warning logs.
     override func makeKeyAndOrderFront(_ sender: Any?) {
-        // Do not call super; keep non-activating behavior and avoid warning.
         orderFrontRegardless()
     }
 
-    override func makeKey() {
-        // Intentionally do nothing to suppress the "makeKeyWindow" warning.
-    }
-
-    override func orderFront(_ sender: Any?) {
-        super.orderFront(sender)
-    }
+    override func makeKey() { }
 }
+

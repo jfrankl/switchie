@@ -92,18 +92,15 @@ struct SwitchOverlayView: View {
     // Empty state shown when no apps match the current filter
     private var emptyStateView: some View {
         VStack(spacing: 14) {
-            // Fun illustration
             Image(systemName: "binoculars")
                 .symbolRenderingMode(.hierarchical)
                 .font(.system(size: 56, weight: .regular))
                 .foregroundStyle(.secondary)
 
-            // Title
             Text("No applications found")
                 .font(.system(size: 14, weight: .semibold))
                 .foregroundStyle(.primary)
 
-            // Message depending on whether there is a query
             Text(emptyStateMessage)
                 .font(.system(size: 12))
                 .multilineTextAlignment(.center)
@@ -112,7 +109,7 @@ struct SwitchOverlayView: View {
         }
         .padding(.vertical, 24)
         .padding(.horizontal, 12)
-        .frame(minHeight: 120) // take up similar vertical space as the items list
+        .frame(minHeight: 120)
     }
 
     private var emptyStateMessage: String {
@@ -185,3 +182,4 @@ struct SwitchOverlayView: View {
             )
     }
 }
+
