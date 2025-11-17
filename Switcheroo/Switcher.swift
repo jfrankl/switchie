@@ -49,6 +49,9 @@ final class Switcher: ObservableObject {
 
     private var overlayOriginApp: NSRunningApplication?
 
+    // NEW: overlay activation observer to auto-close when focus changes
+    private var overlayActivationObserver: Any?
+
     private var windowCycleLastStableIDByPID: [pid_t: Int] = [:]
     private var windowCycleLastIndexByPID: [pid_t: Int] = [:]
 
@@ -276,6 +279,7 @@ final class Switcher: ObservableObject {
     private func hideOverlayAndCleanup(reactivateOrigin: Bool) {
         overlay.hide(animated: true)
         removeOverlayEventMonitor()
+        removeOverlayActivationObserver()
         if reactivateOrigin, let origin = overlayOriginApp {
             _ = origin.activate(options: [])
         }
@@ -316,6 +320,7 @@ final class Switcher: ObservableObject {
         })
 
         installOverlayEventMonitor()
+        installOverlayActivationObserver()
     }
 
     private func seedMRU() {
@@ -421,6 +426,34 @@ final class Switcher: ObservableObject {
         if let global = overlayGlobalEventMonitor {
             NSEvent.removeMonitor(global)
             overlayGlobalEventMonitor = nil
+        }
+    }
+
+    // NEW: observe app activation while overlay visible
+    private func installOverlayActivationObserver() {
+        removeOverlayActivationObserver()
+
+        overlayActivationObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] note in
+            guard let self else { return }
+            guard self.overlayIsVisible() else { return }
+            guard let activated = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
+
+            let myPID = ProcessInfo.processInfo.processIdentifier
+            // If the activated app is not us, the user focused a different app: close the overlay.
+            if activated.processIdentifier != myPID {
+                self.hideOverlayAndCleanup(reactivateOrigin: false)
+            }
+        }
+    }
+
+    private func removeOverlayActivationObserver() {
+        if let obs = overlayActivationObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(obs)
+            overlayActivationObserver = nil
         }
     }
 
@@ -691,4 +724,3 @@ final class Switcher: ObservableObject {
         _ = app.activate(options: [])
     }
 }
-
