@@ -10,33 +10,13 @@ struct ShortcutsSection: View {
     @State private var overlayQuit: Shortcut = Shortcut(keyCode: 12, modifiers: [.command])
 
     // Separate mode state
-    @State private var separateMode: Bool = false
     @State private var separateToggle: Shortcut = Shortcut(keyCode: 111, modifiers: []) // F12
     @State private var separateOverlay: Shortcut = Shortcut(keyCode: 103, modifiers: []) // F11
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 12) {
-                GridRow {
-                    Text("Separate key switch")
-                        .gridLabel()
-                    Toggle("", isOn: $separateMode)
-                        .toggleStyle(.switch)
-                        .onChange(of: separateMode) { _, new in
-                            switcher.setSeparateKeySwitchEnabled(new)
-                        }
-                }
-
-                if separateMode {
-                    GridRow {
-                        Text("Toggle previous app")
-                            .gridLabel()
-                        ShortcutPicker(shortcut: $separateToggle)
-                            .frame(width: 220)
-                            .onChange(of: separateToggle) { _, new in
-                                switcher.applySeparateToggleShortcut(new)
-                            }
-                    }
+                if switcher.separateKeySwitchEnabled {
                     GridRow {
                         Text("Open app panel / cycle")
                             .gridLabel()
@@ -44,6 +24,16 @@ struct ShortcutsSection: View {
                             .frame(width: 220)
                             .onChange(of: separateOverlay) { _, new in
                                 switcher.applySeparateOverlayShortcut(new)
+                            }
+                    }
+
+                    GridRow {
+                        Text("Toggle previous app")
+                            .gridLabel()
+                        ShortcutPicker(shortcut: $separateToggle)
+                            .frame(width: 220)
+                            .onChange(of: separateToggle) { _, new in
+                                switcher.applySeparateToggleShortcut(new)
                             }
                     }
                 } else {
@@ -87,11 +77,9 @@ struct ShortcutsSection: View {
                             switcher.applyOverlayQuitShortcut(new)
                         }
                 }
-                Divider().opacity(0.25).padding(.vertical, 6)
             }
         }
         .onAppear {
-            separateMode = switcher.separateKeySwitchEnabled
             appSwitch = Shortcut.load()
             windowCycle = switcher.windowCycleShortcut
             overlaySelect = switcher.overlaySelectShortcut

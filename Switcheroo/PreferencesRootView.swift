@@ -6,13 +6,18 @@ struct PreferencesRootView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 24) {
                     SectionHeader("General")
-                    OverviewSection()
 
-                    SectionHeader("Shortcuts")
-                    ShortcutsSection()
+                    // Overview contains version, support, tip, and feedback button
+                    OverviewSection()
 
                     SectionHeader("Behavior")
                     BehaviorSection()
+
+                    // Divider between Behavior and Shortcuts sections
+                    Divider().opacity(0.25).padding(.vertical, 6)
+
+                    SectionHeader("Shortcuts")
+                    ShortcutsSection()
                 }
                 .padding(.horizontal, 24)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -20,6 +25,17 @@ struct PreferencesRootView: View {
             .frame(width: 620, height: 400)
         }
         .frame(width: 620, height: 400)
+    }
+
+    // Kept here for reuse by OverviewSection
+    func openAppStoreFeedback() {
+        let fallback = URL(string: "https://apps.apple.com/app/id1234567890?action=write-review")!
+        let deepLink = URL(string: "macappstore://apps.apple.com/app/id1234567890?action=write-review")
+        let urlToOpen = deepLink ?? fallback
+        let opened = NSWorkspace.shared.open(urlToOpen)
+        if !opened {
+            _ = NSWorkspace.shared.open(fallback)
+        }
     }
 }
 
