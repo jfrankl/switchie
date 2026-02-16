@@ -32,7 +32,7 @@ final class HotKeyManager {
 
         callbacks[id] = callback
 
-        var hotKeyID = EventHotKeyID(signature: signature, id: id)
+        let hotKeyID = EventHotKeyID(signature: signature, id: id)
 
         let mods = carbonFlags(from: shortcut.modifiers)
         var ref: EventHotKeyRef?

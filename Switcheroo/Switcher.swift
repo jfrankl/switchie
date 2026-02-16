@@ -1,6 +1,5 @@
 import SwiftUI
 import AppKit
-import UserNotifications
 import Combine
 
 /// Coordinates hotkeys, overlay interactions, MRU tracking, and window cycling.
@@ -75,6 +74,8 @@ final class Switcher: ObservableObject {
         case separateOverlay = 4
     }
 
+    private func isShortcutConfigured(_ s: Shortcut) -> Bool { s.keyCode != 0 }
+
     private var shortcut: Shortcut = .default
     private var pressStart: Date?
     private var longPressTimer: DispatchSourceTimer?
@@ -109,13 +110,8 @@ final class Switcher: ObservableObject {
     // MARK: - Lifecycle
 
     func start() {
-        requestNotificationAuthorization()
         shortcut = Shortcut.load()
         registerAllHotkeysForCurrentMode()
-
-        // Ensure overlay shortcuts are persisted
-        Self.saveOverlaySelectShortcut(overlaySelectShortcut)
-        Self.saveOverlayQuitShortcut(overlayQuitShortcut)
 
         // Track activation to update MRU and reset window cycling stacks
         activationObserver = NSWorkspace.shared.notificationCenter.addObserver(
@@ -170,29 +166,36 @@ final class Switcher: ObservableObject {
         HotKeyManager.shared.unregisterAll()
 
         if separateKeySwitchEnabled {
-            HotKeyManager.shared.register(id: HotKeyID.separateToggle.rawValue, shortcut: separateToggleShortcut) { [weak self] event in
-                guard let self, self.isHotKeyActive(id: HotKeyID.separateToggle.rawValue) else { return }
-                if case .pressed = event { self.onSeparateToggleTap() }
+            if isShortcutConfigured(separateToggleShortcut) {
+                HotKeyManager.shared.register(id: HotKeyID.separateToggle.rawValue, shortcut: separateToggleShortcut) { [weak self] event in
+                    guard let self, self.isHotKeyActive(id: HotKeyID.separateToggle.rawValue) else { return }
+                    if case .pressed = event { self.onSeparateToggleTap() }
+                }
             }
-            HotKeyManager.shared.register(id: HotKeyID.separateOverlay.rawValue, shortcut: separateOverlayShortcut) { [weak self] event in
-                guard let self, self.isHotKeyActive(id: HotKeyID.separateOverlay.rawValue) else { return }
-                if case .pressed = event { self.onSeparateOverlayTap() }
+            if isShortcutConfigured(separateOverlayShortcut) {
+                HotKeyManager.shared.register(id: HotKeyID.separateOverlay.rawValue, shortcut: separateOverlayShortcut) { [weak self] event in
+                    guard let self, self.isHotKeyActive(id: HotKeyID.separateOverlay.rawValue) else { return }
+                    if case .pressed = event { self.onSeparateOverlayTap() }
+                }
             }
         } else {
-            HotKeyManager.shared.register(id: HotKeyID.appSwitch.rawValue, shortcut: shortcut) { [weak self] event in
-                guard let self, self.isHotKeyActive(id: HotKeyID.appSwitch.rawValue) else { return }
-                switch event {
-                case .pressed: self.onHotkeyPressed()
-                case .released: self.onHotkeyReleased()
+            if isShortcutConfigured(shortcut) {
+                HotKeyManager.shared.register(id: HotKeyID.appSwitch.rawValue, shortcut: shortcut) { [weak self] event in
+                    guard let self, self.isHotKeyActive(id: HotKeyID.appSwitch.rawValue) else { return }
+                    switch event {
+                    case .pressed: self.onHotkeyPressed()
+                    case .released: self.onHotkeyReleased()
+                    }
                 }
             }
         }
 
-        HotKeyManager.shared.register(id: HotKeyID.windowCycle.rawValue, shortcut: windowCycleShortcut) { [weak self] event in
-            guard let self, self.isHotKeyActive(id: HotKeyID.windowCycle.rawValue) else { return }
-            if case .pressed = event {
-                self.postWindowCycleNotification()
-                self.togglePreviousWindowInFrontmostApp()
+        if isShortcutConfigured(windowCycleShortcut) {
+            HotKeyManager.shared.register(id: HotKeyID.windowCycle.rawValue, shortcut: windowCycleShortcut) { [weak self] event in
+                guard let self, self.isHotKeyActive(id: HotKeyID.windowCycle.rawValue) else { return }
+                if case .pressed = event {
+                    self.togglePreviousWindowInFrontmostApp()
+                }
             }
         }
     }
@@ -282,7 +285,7 @@ final class Switcher: ObservableObject {
            let s = try? JSONDecoder().decode(Shortcut.self, from: data) {
             return s
         }
-        return Shortcut(keyCode: 103, modifiers: [])
+        return Shortcut(keyCode: 0, modifiers: [])
     }
 
     private static func saveWindowCycleShortcut(_ s: Shortcut) {
@@ -296,7 +299,7 @@ final class Switcher: ObservableObject {
            let s = try? JSONDecoder().decode(Shortcut.self, from: data) {
             return s
         }
-        return defaultOverlaySelect
+        return Shortcut(keyCode: 0, modifiers: [])
     }
 
     private static func saveOverlaySelectShortcut(_ s: Shortcut) {
@@ -310,7 +313,7 @@ final class Switcher: ObservableObject {
            let s = try? JSONDecoder().decode(Shortcut.self, from: data) {
             return s
         }
-        return defaultOverlayQuit
+        return Shortcut(keyCode: 0, modifiers: [])
     }
 
     private static func saveOverlayQuitShortcut(_ s: Shortcut) {
@@ -325,7 +328,7 @@ final class Switcher: ObservableObject {
            let s = try? JSONDecoder().decode(Shortcut.self, from: data) {
             return s
         }
-        return Shortcut(keyCode: 111, modifiers: []) // F12
+        return Shortcut(keyCode: 0, modifiers: [])
     }
 
     private static func saveSeparateToggleShortcut(_ s: Shortcut) {
@@ -339,7 +342,7 @@ final class Switcher: ObservableObject {
            let s = try? JSONDecoder().decode(Shortcut.self, from: data) {
             return s
         }
-        return Shortcut(keyCode: 103, modifiers: []) // F11
+        return Shortcut(keyCode: 0, modifiers: [])
     }
 
     private static func saveSeparateOverlayShortcut(_ s: Shortcut) {
@@ -473,7 +476,6 @@ final class Switcher: ObservableObject {
 
         overlayOriginApp = NSWorkspace.shared.frontmostApplication
 
-        postOverlayEnteredNotification(candidateCount: mru.count)
         overlay.show(candidates: overlayFiltered, selectedIndex: overlaySelectedIndex, searchText: overlaySearchText, showNumberBadges: showNumberBadges, onSelect: { [weak self] app in
             guard let self else { return }
             self.activateApp(app)
@@ -779,7 +781,6 @@ final class Switcher: ObservableObject {
     }
 
     private func restorePreviousApp() {
-        postDebugNotification()
         pruneMRU()
         guard !mru.isEmpty else {
             NSLog("MRU empty; nothing to activate.")
@@ -868,36 +869,5 @@ final class Switcher: ObservableObject {
             _ = app.activate(options: [.activateAllWindows])
         }
     }
-
-    // MARK: - Notifications
-
-    private func requestNotificationAuthorization() {
-        let center = UNUserNotificationCenter.current()
-        center.requestAuthorization(options: [.alert, .sound]) { granted, error in
-            if let error { NSLog("Notification authorization error: \(error.localizedDescription)") }
-            else { NSLog("Notification authorization granted: \(granted)") }
-        }
-    }
-
-    private func postDebugNotification() {
-        postNotification(title: "Switcheroo", body: "Quick switched to previous app.")
-    }
-
-    private func postOverlayEnteredNotification(candidateCount: Int) {
-        postNotification(title: "Switcheroo", body: "Overlay shown with \(candidateCount) apps.")
-    }
-
-    private func postWindowCycleNotification() {
-        postNotification(title: "Switcheroo", body: "Window cycle hotkey pressed.", identifierPrefix: "cycle-")
-    }
-
-    private func postNotification(title: String, body: String, identifierPrefix: String = "") {
-        let content = UNMutableNotificationContent()
-        content.title = title
-        content.body = body
-        let request = UNNotificationRequest(identifier: identifierPrefix + UUID().uuidString, content: content, trigger: nil)
-        UNUserNotificationCenter.current().add(request) { error in
-            if let error { NSLog("Notification failed: \(error.localizedDescription)") }
-        }
-    }
 }
+
