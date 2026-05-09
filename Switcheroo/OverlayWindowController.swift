@@ -32,6 +32,7 @@ final class OverlayWindowController {
     private var hosting: NSHostingView<SwitchOverlayView>?
     private var screenObserver: Any?
 
+
     // Separate toast panel
     private var toastWindow: NSWindow?
     private var toastHosting: NSHostingView<ToastView>?
@@ -56,11 +57,13 @@ final class OverlayWindowController {
 
         previouslyActiveApp = NSWorkspace.shared.frontmostApplication
 
-        window?.alphaValue = 1.0
         window?.isOpaque = false
         window?.isReleasedWhenClosed = false
+        window?.alphaValue = 0
 
         update(candidates: candidates, selectedIndex: selectedIndex, searchText: searchText, showNumberBadges: showNumberBadges, markedBundleIDs: markedBundleIDs)
+
+        hosting?.layoutSubtreeIfNeeded()
         centerOnActiveScreen()
 
         window?.miniwindowTitle = ""
@@ -74,7 +77,8 @@ final class OverlayWindowController {
             window?.orderFrontRegardless()
         }
 
-        // Nudge level to ensure front-most ordering without stealing activation
+        window?.alphaValue = 1.0
+
         if let win = window {
             let currentLevel = win.level
             win.level = NSWindow.Level(rawValue: currentLevel.rawValue + 1)
@@ -187,7 +191,7 @@ final class OverlayWindowController {
 
         win.titleVisibility = .hidden
         win.titlebarAppearsTransparent = true
-        win.isMovableByWindowBackground = true
+        win.isMovableByWindowBackground = false
 
         win.contentView = NSView()
         win.contentView?.wantsLayer = true
