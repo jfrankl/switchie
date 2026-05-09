@@ -36,14 +36,17 @@ final class Switcher: ObservableObject {
     @Published private(set) var windowCycleShortcut: Shortcut
     @Published private(set) var overlaySelectShortcut: Shortcut
     @Published private(set) var overlayQuitShortcut: Shortcut
+    @Published private(set) var overlayMarkShortcut: Shortcut
 
     private static let windowCycleDefaultsKey = "WindowCycleShortcut"
 
     private static let overlaySelectDefaultsKey = "OverlaySelectShortcut"
     private static let overlayQuitDefaultsKey = "OverlayQuitShortcut"
+    private static let overlayMarkDefaultsKey = "OverlayMarkShortcut"
 
     private static var defaultOverlaySelect: Shortcut { Shortcut(keyCode: 36, modifiers: []) }
     private static var defaultOverlayQuit: Shortcut { Shortcut(keyCode: 12, modifiers: [.command]) }
+    private static var defaultOverlayMark: Shortcut { Shortcut(keyCode: 46, modifiers: []) }
 
     // MARK: - Overlay State
 
@@ -60,10 +63,32 @@ final class Switcher: ObservableObject {
     // MARK: - MRU and Window Cycling
 
     private var mru: [NSRunningApplication] = []
+    private var cycleIndex: Int = 0
+    private var isCycling: Bool = false
     private var windowCycleStackByPID: [pid_t: [AppWindow]] = [:]
     private var windowCycleIndexByPID: [pid_t: Int] = [:]
     private var windowCycleLastStableIDByPID: [pid_t: Int] = [:]
     private var windowCycleLastIndexByPID: [pid_t: Int] = [:]
+
+    // MARK: - Marked Apps
+
+    private static let markedAppsDefaultsKey = "MarkedAppBundleIDs"
+
+    private var markedBundleIDs: Set<String> {
+        get { Set(UserDefaults.standard.stringArray(forKey: Self.markedAppsDefaultsKey) ?? []) }
+        set { UserDefaults.standard.set(Array(newValue), forKey: Self.markedAppsDefaultsKey) }
+    }
+
+    private var effectiveCycleList: [NSRunningApplication] {
+        pruneMRU()
+        let marked = markedBundleIDs
+        if marked.isEmpty { return mru }
+        let filtered = mru.filter { app in
+            guard let bid = app.bundleIdentifier else { return false }
+            return marked.contains(bid)
+        }
+        return filtered.isEmpty ? mru : filtered
+    }
 
     // MARK: - Hotkey / Press State
 
@@ -92,6 +117,7 @@ final class Switcher: ObservableObject {
         self.windowCycleShortcut = Self.loadWindowCycleShortcut()
         self.overlaySelectShortcut = Self.loadOverlaySelectShortcut()
         self.overlayQuitShortcut = Self.loadOverlayQuitShortcut()
+        self.overlayMarkShortcut = Self.loadOverlayMarkShortcut()
 
         self.separateKeySwitchEnabled = UserDefaults.standard.object(forKey: Self.separateModeDefaultsKey) as? Bool ?? false
         self.separateToggleShortcut = Self.loadSeparateToggleShortcut()
@@ -248,6 +274,11 @@ final class Switcher: ObservableObject {
         Self.saveOverlayQuitShortcut(s)
     }
 
+    func applyOverlayMarkShortcut(_ s: Shortcut) {
+        overlayMarkShortcut = s
+        Self.saveOverlayMarkShortcut(s)
+    }
+
     func applyLongPressDelay(_ value: TimeInterval) {
         let clamped = max(0.05, min(5.0, value))
         guard clamped != longPressThreshold else { return }
@@ -263,7 +294,7 @@ final class Switcher: ObservableObject {
         guard show != showNumberBadges else { return }
         showNumberBadges = show
         UserDefaults.standard.set(show, forKey: Self.numberBadgesDefaultsKey)
-        overlay.update(candidates: overlayFiltered, selectedIndex: overlaySelectedIndex, searchText: overlaySearchText, showNumberBadges: showNumberBadges)
+        updateOverlay()
     }
 
     func setAutoSelectSingleResult(_ enabled: Bool) {
@@ -319,6 +350,20 @@ final class Switcher: ObservableObject {
     private static func saveOverlayQuitShortcut(_ s: Shortcut) {
         if let data = try? JSONEncoder().encode(s) {
             UserDefaults.standard.set(data, forKey: overlayQuitDefaultsKey)
+        }
+    }
+
+    private static func loadOverlayMarkShortcut() -> Shortcut {
+        if let data = UserDefaults.standard.data(forKey: overlayMarkDefaultsKey),
+           let s = try? JSONDecoder().decode(Shortcut.self, from: data) {
+            return s
+        }
+        return defaultOverlayMark
+    }
+
+    private static func saveOverlayMarkShortcut(_ s: Shortcut) {
+        if let data = try? JSONEncoder().encode(s) {
+            UserDefaults.standard.set(data, forKey: overlayMarkDefaultsKey)
         }
     }
 
@@ -423,7 +468,7 @@ final class Switcher: ObservableObject {
         }
 
         if elapsed < longPressThreshold {
-            restorePreviousApp()
+            cycleToNextApp()
             actionConsumedForThisPress = true
         }
         actionConsumedForThisPress = false
@@ -437,7 +482,7 @@ final class Switcher: ObservableObject {
     // MARK: - Separate mode tap handlers
 
     private func onSeparateToggleTap() {
-        restorePreviousApp()
+        cycleToNextApp()
     }
 
     private func onSeparateOverlayTap() {
@@ -476,7 +521,7 @@ final class Switcher: ObservableObject {
 
         overlayOriginApp = NSWorkspace.shared.frontmostApplication
 
-        overlay.show(candidates: overlayFiltered, selectedIndex: overlaySelectedIndex, searchText: overlaySearchText, showNumberBadges: showNumberBadges, onSelect: { [weak self] app in
+        overlay.show(candidates: overlayFiltered, selectedIndex: overlaySelectedIndex, searchText: overlaySearchText, showNumberBadges: showNumberBadges, markedBundleIDs: markedBundleIDs, onSelect: { [weak self] app in
             guard let self else { return }
             self.activateApp(app)
             self.hideOverlayAndCleanup(reactivateOrigin: false)
@@ -563,6 +608,11 @@ final class Switcher: ObservableObject {
             return true
         }
 
+        if asShortcut == overlayMarkShortcut {
+            toggleMarkForSelectedApp()
+            return true
+        }
+
         if let charsIgnoringMods = event.charactersIgnoringModifiers, charsIgnoringMods.count == 1 {
             let c = charsIgnoringMods.unicodeScalars.first!
             switch c.value {
@@ -630,7 +680,7 @@ final class Switcher: ObservableObject {
         removeAppFromLists(app)
 
         overlay.showToast("Quit \(name)")
-        overlay.update(candidates: overlayFiltered, selectedIndex: overlaySelectedIndex, searchText: overlaySearchText, showNumberBadges: showNumberBadges)
+        updateOverlay()
     }
 
     private func removeAppFromLists(_ app: NSRunningApplication) {
@@ -664,13 +714,31 @@ final class Switcher: ObservableObject {
         return true
     }
 
+    private func toggleMarkForSelectedApp() {
+        guard let idx = overlaySelectedIndex, overlayFiltered.indices.contains(idx) else { return }
+        let app = overlayFiltered[idx]
+        guard let bundleID = app.bundleIdentifier else { return }
+        var marks = markedBundleIDs
+        if marks.contains(bundleID) {
+            marks.remove(bundleID)
+        } else {
+            marks.insert(bundleID)
+        }
+        markedBundleIDs = marks
+        updateOverlay()
+    }
+
+    private func updateOverlay() {
+        overlay.update(candidates: overlayFiltered, selectedIndex: overlaySelectedIndex, searchText: overlaySearchText, showNumberBadges: showNumberBadges, markedBundleIDs: markedBundleIDs)
+    }
+
     private func moveSelection(delta: Int) {
         guard !overlayFiltered.isEmpty else { return }
         let count = overlayFiltered.count
         let current = overlaySelectedIndex ?? 0
         let next = (current + (delta % count) + count) % count
         overlaySelectedIndex = next
-        overlay.update(candidates: overlayFiltered, selectedIndex: overlaySelectedIndex, searchText: overlaySearchText, showNumberBadges: showNumberBadges)
+        updateOverlay()
     }
 
     private func recomputeOverlayFilterAndUpdate() {
@@ -685,7 +753,7 @@ final class Switcher: ObservableObject {
             }
         }
         overlaySelectedIndex = overlayFiltered.isEmpty ? nil : min(overlaySelectedIndex ?? 0, overlayFiltered.count - 1)
-        overlay.update(candidates: overlayFiltered, selectedIndex: overlaySelectedIndex, searchText: overlaySearchText, showNumberBadges: showNumberBadges)
+        updateOverlay()
 
         if autoSelectSingleResult && overlayFiltered.count == 1, let only = overlayFiltered.first {
             activateApp(only)
@@ -726,6 +794,7 @@ final class Switcher: ObservableObject {
 
     private func recordActivation(_ app: NSRunningApplication) {
         guard app.activationPolicy == .regular else { return }
+        if !isCycling { cycleIndex = 0 }
         mru.removeAll { $0.processIdentifier == app.processIdentifier }
         mru.insert(app, at: 0)
         pruneMRU()
@@ -780,16 +849,26 @@ final class Switcher: ObservableObject {
         _ = app.activate(options: [])
     }
 
-    private func restorePreviousApp() {
-        pruneMRU()
-        guard !mru.isEmpty else {
-            NSLog("MRU empty; nothing to activate.")
+    private func cycleToNextApp() {
+        let list = effectiveCycleList
+        guard !list.isEmpty else {
+            NSLog("Cycle list empty; nothing to activate.")
             hideOverlayAndCleanup(reactivateOrigin: false)
             return
         }
-        let targetIndex = (mru.count > 1) ? 1 : 0
-        let target = mru[targetIndex]
+        guard list.count > 1 else {
+            isCycling = true
+            activateApp(list[0])
+            isCycling = false
+            hideOverlayAndCleanup(reactivateOrigin: false)
+            return
+        }
+        cycleIndex += 1
+        if cycleIndex >= list.count { cycleIndex = 1 }
+        let target = list[cycleIndex]
+        isCycling = true
         activateApp(target)
+        isCycling = false
         hideOverlayAndCleanup(reactivateOrigin: false)
     }
 

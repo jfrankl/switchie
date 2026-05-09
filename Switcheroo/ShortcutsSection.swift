@@ -9,6 +9,7 @@ struct ShortcutsSection: View {
     // Overlay actions
     @State private var overlaySelect: Shortcut = Shortcut(keyCode: 36, modifiers: [])
     @State private var overlayQuit: Shortcut = Shortcut(keyCode: 12, modifiers: [.command])
+    @State private var overlayMark: Shortcut = Shortcut(keyCode: 46, modifiers: [])
 
     // Separate mode state
     @State private var separateToggle: Shortcut = Shortcut(keyCode: 111, modifiers: []) // F12
@@ -78,6 +79,15 @@ struct ShortcutsSection: View {
                             switcher.applyOverlayQuitShortcut(new)
                         }
                 }
+                GridRow {
+                    Text("Mark / unmark app")
+                        .gridLabel()
+                    ShortcutPicker(shortcut: $overlayMark)
+                        .frame(width: 220)
+                        .onChange(of: overlayMark) { _, new in
+                            switcher.applyOverlayMarkShortcut(new)
+                        }
+                }
             }
         }
         .onAppear {
@@ -85,6 +95,7 @@ struct ShortcutsSection: View {
             windowCycle = switcher.windowCycleShortcut
             overlaySelect = switcher.overlaySelectShortcut
             overlayQuit = switcher.overlayQuitShortcut
+            overlayMark = switcher.overlayMarkShortcut
 
             separateToggle = switcher.separateToggleShortcut
             separateOverlay = switcher.separateOverlayShortcut

@@ -7,6 +7,7 @@ struct SwitchOverlayView: View {
     let selectedIndex: Int?
     let searchText: String
     let showNumberBadges: Bool
+    let markedBundleIDs: Set<String>
     let onSelect: (NSRunningApplication) -> Void
 
     private let itemSize: CGFloat = 72
@@ -131,12 +132,24 @@ struct SwitchOverlayView: View {
 
     @ViewBuilder
     private func itemView(app: NSRunningApplication, index: Int, isSelected: Bool) -> some View {
+        let isMarked = app.bundleIdentifier.map { markedBundleIDs.contains($0) } ?? false
         VStack(spacing: 8) {
             ZStack(alignment: .topLeading) {
                 iconView(app: app, isSelected: isSelected)
                 if showNumberBadges && index < 10 {
                     numberBadge(number: index == 9 ? "0" : "\(index + 1)")
                         .offset(x: -6, y: -6)
+                        .accessibilityHidden(true)
+                }
+            }
+            .overlay(alignment: .bottomTrailing) {
+                if isMarked {
+                    Image(systemName: "star.fill")
+                        .font(.system(size: 14, weight: .bold))
+                        .foregroundStyle(.yellow)
+                        .shadow(color: .black.opacity(0.5), radius: 2, x: 0, y: 1)
+                        .offset(x: 4, y: 4)
+                        .transition(.scale.combined(with: .opacity))
                         .accessibilityHidden(true)
                 }
             }
@@ -199,6 +212,8 @@ struct SwitchOverlayView: View {
         let name = app.localizedName ?? app.bundleIdentifier ?? "App"
         let prefix = isSelected ? "Selected" : "Item"
         let badge = showNumberBadges && index < 10 ? ", shortcut \(index == 9 ? "0" : "\(index + 1)")" : ""
-        return "\(prefix): \(name)\(badge)"
+        let marked = app.bundleIdentifier.map { markedBundleIDs.contains($0) } ?? false
+        let markLabel = marked ? ", marked" : ""
+        return "\(prefix): \(name)\(badge)\(markLabel)"
     }
 }

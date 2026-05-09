@@ -48,7 +48,7 @@ final class OverlayWindowController {
 
     init() {}
 
-    func show(candidates: [NSRunningApplication], selectedIndex: Int?, searchText: String, showNumberBadges: Bool, onSelect: @escaping (NSRunningApplication) -> Void) {
+    func show(candidates: [NSRunningApplication], selectedIndex: Int?, searchText: String, showNumberBadges: Bool, markedBundleIDs: Set<String>, onSelect: @escaping (NSRunningApplication) -> Void) {
         if window == nil {
             createWindow()
         }
@@ -60,7 +60,7 @@ final class OverlayWindowController {
         window?.isOpaque = false
         window?.isReleasedWhenClosed = false
 
-        update(candidates: candidates, selectedIndex: selectedIndex, searchText: searchText, showNumberBadges: showNumberBadges)
+        update(candidates: candidates, selectedIndex: selectedIndex, searchText: searchText, showNumberBadges: showNumberBadges, markedBundleIDs: markedBundleIDs)
         centerOnActiveScreen()
 
         window?.miniwindowTitle = ""
@@ -82,13 +82,14 @@ final class OverlayWindowController {
         }
     }
 
-    func update(candidates: [NSRunningApplication], selectedIndex: Int?, searchText: String, showNumberBadges: Bool) {
+    func update(candidates: [NSRunningApplication], selectedIndex: Int?, searchText: String, showNumberBadges: Bool, markedBundleIDs: Set<String> = []) {
         guard let hosting else { return }
         let view = SwitchOverlayView(
             candidates: candidates,
             selectedIndex: selectedIndex,
             searchText: searchText,
             showNumberBadges: showNumberBadges,
+            markedBundleIDs: markedBundleIDs,
             onSelect: { [weak self] app in self?.onSelect?(app) }
         )
         hosting.rootView = view
@@ -160,7 +161,7 @@ final class OverlayWindowController {
     // MARK: - Window Setup
 
     private func createWindow() {
-        let content = SwitchOverlayView(candidates: [], selectedIndex: nil, searchText: "", showNumberBadges: true, onSelect: { _ in })
+        let content = SwitchOverlayView(candidates: [], selectedIndex: nil, searchText: "", showNumberBadges: true, markedBundleIDs: [], onSelect: { _ in })
         let hosting = NSHostingView(rootView: content)
         hosting.translatesAutoresizingMaskIntoConstraints = false
 
